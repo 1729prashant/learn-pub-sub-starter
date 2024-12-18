@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/1729prashant/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/1729prashant/learn-pub-sub-starter/internal/pubsub"
@@ -29,6 +30,13 @@ func main() {
 		panic(fmt.Sprintf("Failed to open a channel: %s", err))
 	}
 	defer ch.Close()
+
+	// Declare and bind a durable queue to the peril_topic exchange
+	_, q, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, routing.GameLogSlug+".*", routing.DurableQueue)
+	if err != nil {
+		log.Fatalf("Failed to declare and bind queue: %s", err)
+	}
+	fmt.Printf("Queue %s declared and bound successfully.\n", q.Name)
 
 	// Print help information
 	gamelogic.PrintServerHelp()

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	//"bufio"
 	"fmt"
 	"os"
 	"os/signal"
@@ -41,31 +41,49 @@ func main() {
 
 	fmt.Printf("Queue %s declared and bound successfully.\n", q.Name)
 
+	// Create new game state
+	gameState := gamelogic.NewGameState(username)
+
 	// Set up signal channel for Ctrl+C
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start a goroutine to handle user input for 'quit'
-	quitChan := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			if scanner.Text() == "quit" {
-				quitChan <- struct{}{}
-				return
-			}
-		}
-	}()
-
+	// Start the REPL loop
 	for {
+		words := gamelogic.GetInput()
+		if len(words) == 0 {
+			continue
+		}
+
+		switch words[0] {
+		case "spawn":
+			if err := gameState.CommandSpawn(words); err != nil {
+				fmt.Println("Error:", err)
+			}
+		case "move":
+			if _, err := gameState.CommandMove(words); err != nil {
+				fmt.Println("Error:", err)
+			} else {
+				fmt.Println("Move command executed successfully.")
+			}
+		case "status":
+			gameState.CommandStatus()
+		case "help":
+			gamelogic.PrintClientHelp()
+		case "spam":
+			fmt.Println("Spamming not allowed yet!")
+		case "quit":
+			gamelogic.PrintQuit()
+			return
+		default:
+			fmt.Println("Unknown command. Type 'help' for available commands.")
+		}
+
 		select {
 		case <-signalChan:
 			fmt.Println("\nReceived interrupt signal, exiting...")
 			return
-		case <-quitChan:
-			fmt.Println("User typed 'quit', exiting...")
-			return
-			// Here you could add more cases to handle other events like receiving messages from RabbitMQ
+		default:
 		}
 	}
 }
