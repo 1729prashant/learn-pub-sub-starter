@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/1729prashant/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/1729prashant/learn-pub-sub-starter/internal/pubsub"
@@ -49,22 +51,47 @@ func handlerMove(gs *gamelogic.GameState, conn *amqp.Connection) func(gamelogic.
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+func handlerWar(gs *gamelogic.GameState, conn *amqp.Connection) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
-		outcome, _, _ := gs.HandleWar(rw)
+		outcome, winner, loser := gs.HandleWar(rw)
 		defer fmt.Print("> ")
 
+		var logMessage string
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
 			return pubsub.NackRequeue
 		case gamelogic.WarOutcomeNoUnits:
 			return pubsub.NackDiscard
-		case gamelogic.WarOutcomeOpponentWon, gamelogic.WarOutcomeYouWon, gamelogic.WarOutcomeDraw:
-			return pubsub.Ack
+		case gamelogic.WarOutcomeOpponentWon, gamelogic.WarOutcomeYouWon:
+			logMessage = fmt.Sprintf("%s won a war against %s", winner, loser)
+		case gamelogic.WarOutcomeDraw:
+			logMessage = fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
 		default:
 			fmt.Println("Unexpected war outcome, discarding message.")
 			return pubsub.NackDiscard
 		}
+
+		// Log the event
+		gameLog := routing.GameLog{
+			CurrentTime: time.Now(),
+			Message:     logMessage,
+			Username:    rw.Attacker.Username, // Assuming the attacker initiated the war
+		}
+
+		ch, err := conn.Channel()
+		if err != nil {
+			fmt.Printf("Failed to open channel for logging: %v\n", err)
+			return pubsub.NackRequeue
+		}
+		defer ch.Close()
+
+		err = pubsub.PublishGob(ch, routing.ExchangePerilTopic, routing.GameLogSlug+"."+gameLog.Username, gameLog)
+		if err != nil {
+			fmt.Printf("Failed to publish game log: %v\n", err)
+			return pubsub.NackRequeue
+		}
+
+		return pubsub.Ack
 	}
 }
 
@@ -123,7 +150,7 @@ func main() {
 		"war",                              // Queue name is just "war"
 		routing.WarRecognitionsPrefix+".*", // Matches all war recognition messages
 		routing.DurableQueue,               // Use a durable queue
-		handlerWar(gameState),
+		handlerWar(gameState, conn),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to subscribe to war recognitions: %s", err))
@@ -170,7 +197,24 @@ func main() {
 		case "help":
 			gamelogic.PrintClientHelp()
 		case "spam":
-			fmt.Println("Spamming not allowed yet!")
+			if len(words) < 2 {
+				fmt.Println("Usage: spam <number>")
+				continue
+			}
+			n, err := strconv.Atoi(words[1])
+			if err != nil {
+				fmt.Printf("Invalid number: %s\n", words[1])
+				continue
+			}
+			for i := 0; i < n; i++ {
+				maliciousLog := gamelogic.GetMaliciousLog()
+				err = pubsub.PublishGob(ch, routing.ExchangePerilTopic, routing.GameLogSlug+"."+username, maliciousLog)
+				if err != nil {
+					fmt.Printf("Failed to publish spam log %d: %v\n", i, err)
+					break // Optionally, you might want to break if one publish fails
+				}
+			}
+			fmt.Printf("Spam complete. Sent %d logs.\n", n)
 		case "quit":
 			gamelogic.PrintQuit()
 			return

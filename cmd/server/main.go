@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 
+	// "time"
+
 	"github.com/1729prashant/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/1729prashant/learn-pub-sub-starter/internal/pubsub"
 	"github.com/1729prashant/learn-pub-sub-starter/internal/routing"
@@ -31,15 +33,31 @@ func main() {
 	}
 	defer ch.Close()
 
-	// Declare and bind a durable queue to the peril_topic exchange
-	_, q, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, routing.GameLogSlug+".*", routing.DurableQueue)
-	if err != nil {
-		log.Fatalf("Failed to declare and bind queue: %s", err)
-	}
-	fmt.Printf("Queue %s declared and bound successfully.\n", q.Name)
-
 	// Print help information
 	gamelogic.PrintServerHelp()
+
+	// Subscribe to game logs with SubscribeGob
+	err = pubsub.SubscribeGob(
+		conn,
+		routing.ExchangePerilTopic,
+		routing.GameLogSlug,      // Assuming game_logs is the queue name
+		routing.GameLogSlug+".*", // Wildcard to capture all logs
+		routing.DurableQueue,
+		func(gl routing.GameLog) pubsub.AckType {
+			defer fmt.Print("> ") // New prompt after handling the log
+			log.Printf("Received GameLog: %+v", gl)
+
+			// Write log to disk
+			if err := gamelogic.WriteLog(gl); err != nil {
+				log.Printf("Failed to write log: %v\n", err)
+				return pubsub.NackRequeue
+			}
+			return pubsub.Ack
+		},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to subscribe to game logs: %s", err))
+	}
 
 	for {
 		// Get user input

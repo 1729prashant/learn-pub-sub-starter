@@ -1,7 +1,9 @@
 package pubsub
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -61,7 +63,7 @@ func DeclareAndBind(
 
 	// Define the arguments for the queue declaration, including the dead letter exchange
 	args := amqp.Table{}
-	if queueName != "war" { // Exclude 'war' queue from DLX setup
+	if queueName != "war" && queueName != "game_logs" { // Exclude both 'war' and 'game_logs' queues from DLX setup
 		args["x-dead-letter-exchange"] = "peril_dlx"
 	}
 
@@ -107,14 +109,15 @@ const (
 	NackDiscard
 )
 
-// SubscribeJSON subscribes to a queue and handles messages by unmarshaling them into a generic type T.
-func SubscribeJSON[T any](
+// subscribe is a helper function for both JSON and GOB subscriptions
+func subscribe[T any](
 	conn *amqp.Connection,
 	exchange,
 	queueName,
 	key string,
 	simpleQueueType int,
 	handler func(T) AckType,
+	unmarshaller func([]byte) (T, error),
 ) error {
 	// Ensure the queue exists and is bound to the exchange
 	ch, q, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
@@ -140,9 +143,8 @@ func SubscribeJSON[T any](
 	go func() {
 		for d := range deliveries {
 			var msg T
-			if err := json.Unmarshal(d.Body, &msg); err != nil {
+			if msg, err = unmarshaller(d.Body); err != nil {
 				fmt.Printf("Failed to unmarshal message: %v\n", err)
-				// Even if unmarshaling fails, we should acknowledge to prevent queue buildup
 				d.Nack(false, true)
 				log.Println("Message NackRequeue due to unmarshal error")
 				continue
@@ -162,12 +164,76 @@ func SubscribeJSON[T any](
 				d.Nack(false, false)
 				log.Println("Message NackDiscard")
 			default:
-				// Default to Acknowledge if an unexpected AckType is returned
 				d.Ack(false)
 				log.Println("Unexpected AckType, Message Acknowledged")
 			}
 		}
 	}()
 
+	return nil
+}
+
+// SubscribeJSON uses JSON unmarshalling
+func SubscribeJSON[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	simpleQueueType int,
+	handler func(T) AckType,
+) error {
+	return subscribe(conn, exchange, queueName, key, simpleQueueType, handler, func(data []byte) (T, error) {
+		var result T
+		if err := json.Unmarshal(data, &result); err != nil {
+			return result, err
+		}
+		return result, nil
+	})
+}
+
+// SubscribeGob uses GOB unmarshalling
+func SubscribeGob(
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	simpleQueueType int,
+	handler func(routing.GameLog) AckType,
+) error {
+	return subscribe[routing.GameLog](conn, exchange, queueName, key, simpleQueueType, handler, func(data []byte) (routing.GameLog, error) {
+		var result routing.GameLog
+		buf := bytes.NewBuffer(data)
+		dec := gob.NewDecoder(buf)
+		if err := dec.Decode(&result); err != nil {
+			return result, err
+		}
+		return result, nil
+	})
+}
+
+// PublishGob publishes a GOB-encoded message to a RabbitMQ exchange using the given channel.
+func PublishGob[T any](ch *amqp.Channel, exchange, key string, val T) error {
+	// Encode the value to GOB
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(val); err != nil {
+		return fmt.Errorf("failed to encode to GOB: %v", err)
+	}
+
+	// Publish GOB message to exchange
+	err := ch.PublishWithContext(
+		context.Background(),
+		exchange,
+		key,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "application/gob",
+			Body:        buf.Bytes(),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish message: %v", err)
+	}
 	return nil
 }
