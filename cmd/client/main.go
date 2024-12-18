@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/1729prashant/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/1729prashant/learn-pub-sub-starter/internal/pubsub"
@@ -37,5 +40,32 @@ func main() {
 	defer ch.Close()
 
 	fmt.Printf("Queue %s declared and bound successfully.\n", q.Name)
-	// Here you would typically start consuming messages or continue with other client logic
+
+	// Set up signal channel for Ctrl+C
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+
+	// Start a goroutine to handle user input for 'quit'
+	quitChan := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			if scanner.Text() == "quit" {
+				quitChan <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-signalChan:
+			fmt.Println("\nReceived interrupt signal, exiting...")
+			return
+		case <-quitChan:
+			fmt.Println("User typed 'quit', exiting...")
+			return
+			// Here you could add more cases to handle other events like receiving messages from RabbitMQ
+		}
+	}
 }

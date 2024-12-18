@@ -16,9 +16,7 @@ const (
 )
 
 // QueueType enum for use in pubsub package
-type QueueType int
-
 const (
-	DurableQueue QueueType = iota
+	DurableQueue int = iota
 	TransientQueue
 )

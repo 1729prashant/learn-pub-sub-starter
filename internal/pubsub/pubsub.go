@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/1729prashant/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -34,30 +35,28 @@ func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
 	return nil
 }
 
-// QueueType is an enum to represent types of queues
-type QueueType int
-
-const (
-	DurableQueue QueueType = iota
-	TransientQueue
-)
-
 // DeclareAndBind declares and binds a queue to an exchange in RabbitMQ
 func DeclareAndBind(
 	conn *amqp.Connection,
 	exchange,
 	queueName,
 	key string,
-	simpleQueueType QueueType,
+	simpleQueueType int,
 ) (*amqp.Channel, amqp.Queue, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, amqp.Queue{}, err
 	}
+	// After connecting to RabbitMQ
+	fmt.Println("Successfully connected to RabbitMQ")
 
-	durable := simpleQueueType == DurableQueue
-	autoDelete := simpleQueueType == TransientQueue
-	exclusive := simpleQueueType == TransientQueue
+	durable := simpleQueueType == routing.DurableQueue
+	autoDelete := simpleQueueType == routing.TransientQueue
+	exclusive := simpleQueueType == routing.TransientQueue
+
+	// Before declaring queue
+	fmt.Printf("Attempting to declare queue with name: %s\n", queueName)
+	fmt.Printf("Exchange: %s, RoutingKey: %s\n", routing.ExchangePerilDirect, routing.PauseKey)
 
 	q, err := ch.QueueDeclare(
 		queueName,  // name
@@ -71,6 +70,11 @@ func DeclareAndBind(
 		ch.Close()
 		return nil, amqp.Queue{}, err
 	}
+
+	// After declaring queue
+	fmt.Printf("Queue declared with properties: name=%s, messages=%d, consumers=%d\n", q.Name, q.Messages, q.Consumers)
+
+	fmt.Printf("Queue details - Name: %s, Durable: %v, AutoDelete: %v, Exclusive: %v\n", q.Name, durable, autoDelete, exclusive)
 
 	err = ch.QueueBind(
 		q.Name,   // queue name
