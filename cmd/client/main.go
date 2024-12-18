@@ -1,7 +1,6 @@
 package main
 
 import (
-	//"bufio"
 	"fmt"
 	"os"
 	"os/signal"
@@ -13,6 +12,61 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(ps routing.PlayingState) pubsub.AckType {
+		gs.HandlePause(ps) // Pass the entire PlayingState struct
+		if ps.IsPaused {
+			fmt.Println("Game paused.")
+		} else {
+			fmt.Println("Game resumed.")
+		}
+		defer fmt.Print("> ")
+		return pubsub.Ack // Always acknowledge pause/resume messages
+	}
+}
+
+func handlerMove(gs *gamelogic.GameState, conn *amqp.Connection) func(gamelogic.ArmyMove) pubsub.AckType {
+	return func(am gamelogic.ArmyMove) pubsub.AckType {
+		outcome, err := gs.HandleMove(am, conn)
+		if err != nil {
+			fmt.Printf("Error handling move: %v\n", err)
+			return pubsub.NackRequeue // Requeue on any error during move handling
+		}
+		defer fmt.Print("> ")
+
+		switch outcome {
+		case gamelogic.MoveOutComeSafe:
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeMakeWar:
+			// If there's no error publishing the war declaration, we acknowledge the move
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeSamePlayer:
+			return pubsub.NackDiscard
+		default:
+			return pubsub.NackDiscard
+		}
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
+		outcome, _, _ := gs.HandleWar(rw)
+		defer fmt.Print("> ")
+
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeOpponentWon, gamelogic.WarOutcomeYouWon, gamelogic.WarOutcomeDraw:
+			return pubsub.Ack
+		default:
+			fmt.Println("Unexpected war outcome, discarding message.")
+			return pubsub.NackDiscard
+		}
+	}
+}
 
 func main() {
 	fmt.Println("Starting Peril client...")
@@ -31,18 +85,56 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Declare and bind a transient queue
-	queueName := routing.PauseKey + "." + username
-	ch, q, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilDirect, queueName, routing.PauseKey, routing.TransientQueue)
+	// Subscribe to pause/resume messages
+	pauseQueueName := routing.PauseKey + "." + username
+	err = pubsub.SubscribeJSON[routing.PlayingState](
+		conn,
+		routing.ExchangePerilDirect,
+		pauseQueueName,
+		routing.PauseKey,
+		routing.TransientQueue,
+		handlerPause(gamelogic.NewGameState(username)),
+	)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to declare and bind queue: %s", err))
+		panic(fmt.Sprintf("Failed to subscribe to pause messages: %s", err))
 	}
-	defer ch.Close()
-
-	fmt.Printf("Queue %s declared and bound successfully.\n", q.Name)
 
 	// Create new game state
 	gameState := gamelogic.NewGameState(username)
+
+	// Subscribe to other players' moves
+	moveQueueName := routing.ArmyMovesPrefix + "." + username
+	err = pubsub.SubscribeJSON[gamelogic.ArmyMove](
+		conn,
+		routing.ExchangePerilTopic,
+		moveQueueName,
+		routing.ArmyMovesPrefix+".*",
+		routing.TransientQueue,
+		handlerMove(gameState, conn),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to subscribe to army moves: %s", err))
+	}
+
+	// Subscribe to war recognitions
+	err = pubsub.SubscribeJSON[gamelogic.RecognitionOfWar](
+		conn,
+		routing.ExchangePerilTopic,
+		"war",                              // Queue name is just "war"
+		routing.WarRecognitionsPrefix+".*", // Matches all war recognition messages
+		routing.DurableQueue,               // Use a durable queue
+		handlerWar(gameState),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to subscribe to war recognitions: %s", err))
+	}
+
+	// Create a new channel for publishing
+	ch, err := conn.Channel()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to open a channel: %s", err))
+	}
+	defer ch.Close()
 
 	// Set up signal channel for Ctrl+C
 	signalChan := make(chan os.Signal, 1)
@@ -61,10 +153,17 @@ func main() {
 				fmt.Println("Error:", err)
 			}
 		case "move":
-			if _, err := gameState.CommandMove(words); err != nil {
+			armyMove, err := gameState.CommandMove(words)
+			if err != nil {
 				fmt.Println("Error:", err)
 			} else {
-				fmt.Println("Move command executed successfully.")
+				// Publish the move
+				err = pubsub.PublishJSON(ch, routing.ExchangePerilTopic, routing.ArmyMovesPrefix+"."+username, armyMove)
+				if err != nil {
+					fmt.Printf("Failed to publish move: %s\n", err)
+				} else {
+					fmt.Println("Move published successfully.")
+				}
 			}
 		case "status":
 			gameState.CommandStatus()

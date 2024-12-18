@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/1729prashant/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -56,7 +57,13 @@ func DeclareAndBind(
 
 	// Before declaring queue
 	fmt.Printf("Attempting to declare queue with name: %s\n", queueName)
-	fmt.Printf("Exchange: %s, RoutingKey: %s\n", routing.ExchangePerilDirect, routing.PauseKey)
+	fmt.Printf("Exchange: %s, RoutingKey: %s\n", exchange, key) // Updated to use generic exchange and key
+
+	// Define the arguments for the queue declaration, including the dead letter exchange
+	args := amqp.Table{}
+	if queueName != "war" { // Exclude 'war' queue from DLX setup
+		args["x-dead-letter-exchange"] = "peril_dlx"
+	}
 
 	q, err := ch.QueueDeclare(
 		queueName,  // name
@@ -64,7 +71,7 @@ func DeclareAndBind(
 		autoDelete, // autoDelete
 		exclusive,  // exclusive
 		false,      // noWait
-		nil,        // args
+		args,       // args - now includes dead letter exchange
 	)
 	if err != nil {
 		ch.Close()
@@ -89,4 +96,78 @@ func DeclareAndBind(
 	}
 
 	return ch, q, nil
+}
+
+// AckType represents the acknowledgment types for message handling.
+type AckType int
+
+const (
+	Ack AckType = iota
+	NackRequeue
+	NackDiscard
+)
+
+// SubscribeJSON subscribes to a queue and handles messages by unmarshaling them into a generic type T.
+func SubscribeJSON[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	simpleQueueType int,
+	handler func(T) AckType,
+) error {
+	// Ensure the queue exists and is bound to the exchange
+	ch, q, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
+	if err != nil {
+		return fmt.Errorf("failed to declare and bind queue: %v", err)
+	}
+
+	// Create a new channel for consuming messages
+	deliveries, err := ch.Consume(
+		q.Name, // queue
+		"",     // consumer tag - empty string for auto-generated
+		false,  // auto-ack - set to false because we'll manually acknowledge
+		false,  // exclusive
+		false,  // no-local
+		false,  // no-wait
+		nil,    // args
+	)
+	if err != nil {
+		return fmt.Errorf("failed to register consumer: %v", err)
+	}
+
+	// Start a goroutine to process messages
+	go func() {
+		for d := range deliveries {
+			var msg T
+			if err := json.Unmarshal(d.Body, &msg); err != nil {
+				fmt.Printf("Failed to unmarshal message: %v\n", err)
+				// Even if unmarshaling fails, we should acknowledge to prevent queue buildup
+				d.Nack(false, true)
+				log.Println("Message NackRequeue due to unmarshal error")
+				continue
+			}
+
+			// Call the handler function with the unmarshaled message and get the AckType
+			ackType := handler(msg)
+
+			switch ackType {
+			case Ack:
+				d.Ack(false)
+				log.Println("Message Acknowledged")
+			case NackRequeue:
+				d.Nack(false, true)
+				log.Println("Message NackRequeue")
+			case NackDiscard:
+				d.Nack(false, false)
+				log.Println("Message NackDiscard")
+			default:
+				// Default to Acknowledge if an unexpected AckType is returned
+				d.Ack(false)
+				log.Println("Unexpected AckType, Message Acknowledged")
+			}
+		}
+	}()
+
+	return nil
 }

@@ -4,6 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+
+	"github.com/1729prashant/learn-pub-sub-starter/internal/pubsub"
+	"github.com/1729prashant/learn-pub-sub-starter/internal/routing"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type MoveOutcome int
@@ -14,7 +18,7 @@ const (
 	MoveOutcomeMakeWar
 )
 
-func (gs *GameState) HandleMove(move ArmyMove) MoveOutcome {
+func (gs *GameState) HandleMove(move ArmyMove, conn *amqp.Connection) (MoveOutcome, error) {
 	defer fmt.Println("------------------------")
 	player := gs.GetPlayerSnap()
 
@@ -26,16 +30,31 @@ func (gs *GameState) HandleMove(move ArmyMove) MoveOutcome {
 	}
 
 	if player.Username == move.Player.Username {
-		return MoveOutcomeSamePlayer
+		return MoveOutcomeSamePlayer, nil
 	}
 
 	overlappingLocation := getOverlappingLocation(player, move.Player)
 	if overlappingLocation != "" {
 		fmt.Printf("You have units in %s! You are at war with %s!\n", overlappingLocation, move.Player.Username)
-		return MoveOutcomeMakeWar
+
+		// Publish war recognition
+		war := RecognitionOfWar{
+			Attacker: move.Player,
+			Defender: player,
+		}
+		ch, err := conn.Channel()
+		if err != nil {
+			return MoveOutcomeMakeWar, fmt.Errorf("failed to open channel for war recognition: %v", err)
+		}
+		defer ch.Close()
+		if err := pubsub.PublishJSON(ch, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix+"."+player.Username, war); err != nil {
+			return MoveOutcomeMakeWar, fmt.Errorf("failed to publish war recognition: %v", err)
+		}
+
+		return MoveOutcomeMakeWar, nil
 	}
 	fmt.Printf("You are safe from %s's units.\n", move.Player.Username)
-	return MoveOutComeSafe
+	return MoveOutComeSafe, nil
 }
 
 func getOverlappingLocation(p1 Player, p2 Player) Location {
